@@ -1,2 +1,12 @@
-.env
+# Dependencies and build output
 node_modules
+dist
+
+# Secrets (copy backend/.env.example to backend/.env)
+.env
+.env.local
+.env.*.local
+
+# OS / editor
+.DS_Store
+*.log

@@ -1,10 +1,11 @@
 const mongoose = require('mongoose')
 
-mongoose.connect(process.env.MONGODB_URI).then(res=>{
-    console.log("MongoDB Connected...");
-    
-})
-.catch(err=>{
-    console.log("MongoDB Connection error"+err);
-    
-})
+const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/bookstore'
+
+mongoose.connect(mongoUri)
+  .then(() => {
+    console.log("MongoDB Connected successfully");
+  })
+  .catch((err) => {
+    console.error("MongoDB Connection error: " + err.message);
+  })

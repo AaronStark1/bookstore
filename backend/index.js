@@ -15,7 +15,7 @@ bookStoreServer.use(appMiddleware)
 bookStoreServer.use(route)
 bookStoreServer.use('/uploads',express.static('./uploads'))
 
-const PORT =3000|| process.env.PORT
+const PORT = process.env.PORT || 3000
 
 bookStoreServer.get('/',(req,res)=>{
     res.send("Welcome to bookstore server")

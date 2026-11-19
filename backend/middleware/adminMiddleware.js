@@ -1,28 +1,35 @@
 const jwt = require('jsonwebtoken')
 
 const adminMiddleware = (req, res, next) => {
-  console.log("Inside admin jwt Middleware");
-
   try {
-    const token = req.headers.authorization.slice(7);
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader) {
+      return res.status(401).json("Authorization Error: No token provided");
+    }
 
-    console.log(token);
+    const token = authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : authHeader;
 
-    // use the env variable name you set in .env, e.g. JWT_KEY
     const jwtKey = process.env.JWT_KEY;
+    if (!jwtKey) {
+      console.error("JWT_KEY is not defined in environment variables");
+      return res.status(500).json("Server configuration error: JWT_KEY missing");
+    }
 
     const jwtVerification = jwt.verify(token, jwtKey);
-    console.log(jwtVerification); // { userMail: '...', role: 'BookStore User', iat: ... }
-
     req.payload = jwtVerification.userMail;
-    req.role=jwtVerification.role
-    if (req.role=='Admin') {
-        next()
+    req.user = jwtVerification;
+    req.role = jwtVerification.role;
+
+    if (req.role === 'Admin') {
+      next();
     } else {
-        res.status(403).json("Authorization Error..only admin can access")
+      res.status(403).json("Authorization Error: Only admin can access this resource");
     }
   } catch (err) {
-    return res.status(402).json("Authorization Error " + err);
+    console.error("Admin JWT error:", err.message);
+    return res.status(401).json("Authorization Error: " + err.message);
   }
 };
 

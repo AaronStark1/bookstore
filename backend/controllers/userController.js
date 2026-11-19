@@ -64,12 +64,11 @@ exports.googleLogin = async (req, res) => {
         else {
             const newUser = new User({ username, email, password, profile })
             await newUser.save()
-            res.status(200).json({ message: "Register Success", newUser })
 
             // token generation 
             const token = jwt.sign({ userMail: newUser.email, role: newUser.role }, process.env.JWT_KEY)
             console.log('googleLogin', token);
-            res.status(200).json({ message: "Login Success",existingUser:newUser, token })
+            res.status(200).json({ message: "Login Success", existingUser: newUser, token })
         }
     } catch (error) {
         res.status(500).json(error)
@@ -86,47 +85,52 @@ exports.getUsers = async(req,res)=>{
     }
 }
 
-exports.updateAdmin = async(req,res)=>{
-    const {username,password,bio,profile} = req.body
-    const email = req.payload
-    const role = req.role
-    const uploadedProfile = req.file?req.file.filename:profile
+exports.updateAdmin = async (req, res) => {
+    const { username, password, bio, profile } = req.body
+    const email = typeof req.payload === 'object' ? req.payload.userMail : (req.payload || req.user?.userMail)
+    const role = req.role || req.user?.role || "Admin"
+    const uploadedProfile = req.file ? req.file.filename : profile
 
     try {
-        const updateAdmin=await User.findOneAndUpdate({email},{username,password,bio,profile:uploadedProfile,bio,role},{new:true})
-        await updateAdmin.save()
-        res.status(200).json({message:"Updated Successfully...",updateAdmin})
+        const updateAdmin = await User.findOneAndUpdate(
+            { email },
+            { username, password, bio, profile: uploadedProfile, role },
+            { new: true }
+        )
+        if (!updateAdmin) {
+            return res.status(404).json("Admin not found")
+        }
+        res.status(200).json({ message: "Updated Successfully...", updateAdmin })
     } catch (err) {
-        res.status(500).json("Error"+err)
+        res.status(500).json("Error" + err)
     }
 }
 
-exports.getAdmin = async(req,res)=>{
+exports.getAdmin = async (req, res) => {
     try {
-        const admin=await User.findOne({role:{$eq:"Admin"}})
+        const admin = await User.findOne({ role: { $eq: "Admin" } })
         res.status(200).json(admin)
     } catch (err) {
-        res.status(500).json("Error"+err)
+        res.status(500).json("Error" + err)
     }
 }
 
 exports.updateUser = async (req, res) => {
-  const { username, password, bio, profile } = req.body;
-  const email = req.payload;                     // set by jwtMiddleware from token
-  const uploadedProfile = req.file ? req.file.filename : profile;
+    const { username, password, bio, profile } = req.body;
+    const email = typeof req.payload === 'object' ? req.payload.userMail : (req.payload || req.user?.userMail);
+    const uploadedProfile = req.file ? req.file.filename : profile;
 
-  try {
-    const updateUser = await User.findOneAndUpdate(
-      { email },
-      { username, password, bio, profile: uploadedProfile },
-      { new: true }
-    );
-    if (!updateUser) {
-      return res.status(404).json("User not found");
+    try {
+        const updateUser = await User.findOneAndUpdate(
+            { email },
+            { username, password, bio, profile: uploadedProfile },
+            { new: true }
+        );
+        if (!updateUser) {
+            return res.status(404).json("User not found");
+        }
+        res.status(200).json({ message: "Updated Successfully...", updateUser });
+    } catch (err) {
+        res.status(500).json("Error" + err);
     }
-    await updateUser.save();
-    res.status(200).json({ message: "Updated Successfully...", updateUser });
-  } catch (err) {
-    res.status(500).json("Error" + err);
-  }
 };

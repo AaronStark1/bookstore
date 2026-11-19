@@ -1,6 +1,6 @@
 // controllers/bookController.js (CommonJS, like userController)
 const Stripe = require("stripe");
-const stripe = new Stripe(process.env.paymentKey); // make sure paymentKey exists in .env
+const stripe = process.env.paymentKey ? new Stripe(process.env.paymentKey) : null;
 
 const books = require("../models/bookModel");
 
@@ -30,14 +30,14 @@ exports.addBook = async (req, res) => {
     : [];
   console.log(UploadedImages);
 
-  // get user mail from JWT verification
-  const userMail = req.payload;
+  // get user mail from JWT verification (handles string or decoded payload)
+  const userMail = typeof req.payload === 'object' ? req.payload.userMail : (req.payload || req.user?.userMail);
   console.log(userMail);
 
   try {
     const existingBook = await books.findOne({ title, userMail });
     if (existingBook) {
-      return res.status(402).json("Book already existing");
+      return res.status(409).json("Book already existing");
     } else {
       const newBook = new books({
         title,
@@ -106,7 +106,16 @@ exports.viewBook = async (req, res) => {
 // BUY BOOK + STRIPE CHECKOUT
 exports.buyBook = async (req, res) => {
   const { bookDetails } = req.body;
-  const email = req.payload.userMail; // jwtMiddleware should set req.payload = { userMail, role }
+  if (!bookDetails || !bookDetails._id) {
+    return res.status(400).json("Book details are required");
+  }
+
+  // Support string payload or object payload
+  const email = req.user?.userMail || (typeof req.payload === 'object' ? req.payload.userMail : req.payload);
+
+  if (!stripe) {
+    return res.status(500).json("Stripe payment is not configured. Please set paymentKey in .env");
+  }
 
   try {
     // Update book status to sold
@@ -136,29 +145,31 @@ exports.buyBook = async (req, res) => {
       return res.status(404).json("Book not found");
     }
 
+    const clientUrl = process.env.CLIENT_URL || "http://localhost:5173";
+
     const line_items = [
       {
         price_data: {
-          currency: "usd",
+          currency: "inr",
           product_data: {
             name: bookDetails.title,
             description: `${bookDetails.author} | ${bookDetails.publisher}`,
-            images: [bookDetails.imageUrl],
+            images: bookDetails.imageUrl ? [bookDetails.imageUrl] : [],
             metadata: {
               title: bookDetails.title,
               author: bookDetails.author,
-              noofpages: bookDetails.noofpages,
-              imageUrl: bookDetails.imageUrl,
-              price: bookDetails.price,
-              dprice: bookDetails.dprice,
-              abstract: bookDetails.abstract,
-              publisher: bookDetails.publisher,
-              language: bookDetails.language,
-              isbn: bookDetails.isbn,
-              category: bookDetails.category,
+              noofpages: String(bookDetails.noofpages || ""),
+              imageUrl: bookDetails.imageUrl || "",
+              price: String(bookDetails.price || ""),
+              dprice: String(bookDetails.dprice || ""),
+              abstract: bookDetails.abstract ? bookDetails.abstract.slice(0, 450) : "",
+              publisher: bookDetails.publisher || "",
+              language: bookDetails.language || "",
+              isbn: bookDetails.isbn || "",
+              category: bookDetails.category || "",
               status: "sold",
-              userMail: bookDetails.userMail,
-              brought: email,
+              userMail: bookDetails.userMail || "",
+              brought: email || "",
             },
           },
           unit_amount: Math.round(Number(bookDetails.dprice) * 100),
@@ -168,9 +179,9 @@ exports.buyBook = async (req, res) => {
     ];
 
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"], // must be "card", not "cards" [web:211]
-      success_url: "http://localhost:5173/payment-success",
-      cancel_url: "http://localhost:5173/payment-error",
+      payment_method_types: ["card"], // must be "card", not "cards"
+      success_url: `${clientUrl}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${clientUrl}/payment-error`,
       line_items,
       mode: "payment",
     });
@@ -180,6 +191,6 @@ exports.buyBook = async (req, res) => {
       .json({ message: "Success", session, sessionID: session.id });
   } catch (err) {
     console.error(err);
-    res.status(500).json("Payment Error" + err);
+    res.status(500).json("Payment Error: " + err.message);
   }
 };

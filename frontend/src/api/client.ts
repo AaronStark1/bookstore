@@ -5,8 +5,9 @@
  * /uploads to the backend (default http://localhost:3000). Set VITE_API_BASE to
  * call a backend on another origin directly instead.
  */
-import { proceduralCover, makeSpineStyle } from '../lib/procedural'
-import type { AuthUser, BookDocument, ShelfBook } from '../types'
+import { hash32 } from '../lib/math'
+import { CLOTHS, FOILS, isMotif, makeCoverSvg, makeSpineStyle, proceduralCover, svgToDataUri } from '../lib/procedural'
+import type { AuthUser, BookDocument, FoilKind, ShelfBook } from '../types'
 
 const API_BASE = ((import.meta.env.VITE_API_BASE as string | undefined) ?? '').replace(/\/+$/, '')
 
@@ -142,7 +143,21 @@ export function assetUrl(name: string): string {
 export function toShelfBook(doc: BookDocument): ShelfBook {
   const rawYear = (doc as { year?: unknown }).year
   const year = typeof rawYear === 'number' && Number.isFinite(rawYear) ? rawYear : undefined
-  const coverFallback = proceduralCover(doc.title, doc.author ?? '')
+  const edition = typeof doc.edition === 'string' && doc.edition.trim() ? doc.edition : undefined
+  const design = storedDesign(doc)
+  const coverFallback = design
+    ? svgToDataUri(
+        makeCoverSvg({
+          title: doc.title,
+          author: doc.author ?? '',
+          year,
+          no: design.no,
+          palette: design.palette,
+          motif: design.motif,
+          seed: hash32(doc.title),
+        }),
+      )
+    : proceduralCover(doc.title, doc.author ?? '')
   const images = Array.isArray(doc.UploadedImages) ? doc.UploadedImages : []
   return {
     id: doc._id,
@@ -152,6 +167,22 @@ export function toShelfBook(doc: BookDocument): ShelfBook {
     coverFallback,
     gallery: images.filter((name): name is string => typeof name === 'string' && name.length > 0).map(assetUrl),
     year,
-    spine: makeSpineStyle(doc.title),
+    edition,
+    spine: makeSpineStyle(doc.title, design ? { cloth: design.cloth, foil: design.foil } : undefined),
+  }
+}
+
+/** A document's stored cover/spine design, or null when it is missing or malformed (then the title decides). */
+function storedDesign(doc: BookDocument) {
+  const d = doc.design
+  if (!d || typeof d !== 'object' || !isMotif(d.motif)) return null
+  const p = d.palette
+  if (!p || ![p.bg, p.ink, p.accent, p.accent2].every((c) => typeof c === 'string')) return null
+  return {
+    motif: d.motif,
+    palette: p,
+    no: typeof d.no === 'number' ? d.no : undefined,
+    cloth: Number.isInteger(d.cloth) && d.cloth! >= 0 && d.cloth! < CLOTHS.length ? d.cloth : undefined,
+    foil: typeof d.foil === 'string' && d.foil in FOILS ? (d.foil as FoilKind) : undefined,
   }
 }

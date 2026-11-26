@@ -239,6 +239,8 @@ const MOTIFS: Record<Motif, MotifFn> = {
 
 const MOTIF_NAMES = Object.keys(MOTIFS) as Motif[]
 
+export const isMotif = (name: unknown): name is Motif => typeof name === 'string' && name in MOTIFS
+
 const PALETTES: CoverPalette[] = [
   { bg: '#E4DCCB', ink: '#16181D', accent: '#B4432E', accent2: '#5C6B3C' },
   { bg: '#D6DCE0', ink: '#1A2233', accent: '#1F3FB0', accent2: '#C99A2E' },

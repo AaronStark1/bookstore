@@ -20,6 +20,21 @@ export interface BookDocument {
   status: 'pending' | 'sold' | (string & {})
   userMail: string
   brought?: string
+  /** Optional presentation fields (the seeded folios in backend/seed/specimens.json carry them). */
+  year?: number
+  edition?: string
+  design?: BookDesign
+}
+
+/** A stored cover and spine design, so a backend book can be drawn like a specimen folio. */
+export interface BookDesign {
+  /** Catalogue number printed on the cover. */
+  no?: number
+  motif: string
+  palette: { bg: string; ink: string; accent: string; accent2: string }
+  /** Index into CLOTHS (lib/procedural.ts). */
+  cloth?: number
+  foil?: FoilKind
 }
 
 export type ClothKind = 'buckram' | 'morocco' | 'washi'

@@ -10,3 +10,6 @@ dist
 # OS / editor
 .DS_Store
 *.log
+
+# Seed backups hold buyers' email addresses
+backend/seed/backups/

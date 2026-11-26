@@ -141,4 +141,9 @@ The frontend proxies `/api` and `/uploads` to the backend. **No backend yet?**
 Run only the frontend: the shelf falls back to twelve built-in specimen folios
 (the ones in the screenshots above), which you can browse but not buy.
 
+To stock an empty database with those twelve folios, as real books that can
+be bought, run `npm --prefix backend run seed`. Adding `-- --replace` also
+removes every other book. Either way, the current books are first saved to
+`backend/seed/backups/`.
+
 Other scripts: `npm run build` and `npm run lint` (both for the frontend).

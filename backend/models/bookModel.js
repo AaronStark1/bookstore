@@ -15,9 +15,11 @@ const bookSchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
+  // Optional: without an image the frontend draws the cover from `design`
+  // (or from the title when there is no design either).
   imageUrl: {
     type: String,
-    required: true,
+    default: "",
   },
   price: {
     type: Number,
@@ -63,6 +65,11 @@ const bookSchema = new mongoose.Schema({
     type: String,
     default: "",
   },
+  // Optional presentation fields, used by the seeded folios (seed/specimens.json).
+  year: Number,
+  edition: String,
+  // { no, motif, palette: { bg, ink, accent, accent2 }, cloth, foil } for the procedural cover and spine.
+  design: mongoose.Schema.Types.Mixed,
 });
 
 module.exports = mongoose.model("books", bookSchema);

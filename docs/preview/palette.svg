@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="236" viewBox="0 0 960 236" font-family="'Inter Tight', 'Helvetica Neue', Arial, sans-serif">
+  <rect width="960" height="236" fill="#ECE8E0"/>
+  <line x1="32" y1="188" x2="928" y2="188" stroke="#141414" stroke-opacity="0.85" stroke-width="1.5"/>
+
+  <!-- Spines: one per archival token -->
+  <g>
+    <rect x="32"  y="28" width="104" height="160" fill="#ECE8E0" stroke="#141414" stroke-opacity="0.25"/>
+    <rect x="186" y="28" width="104" height="160" fill="#F4F1EA" stroke="#141414" stroke-opacity="0.25"/>
+    <rect x="340" y="28" width="104" height="160" fill="#141414"/>
+    <rect x="494" y="28" width="104" height="160" fill="#1F3FB0"/>
+    <rect x="648" y="28" width="104" height="160" fill="#8C2218"/>
+    <rect x="802" y="28" width="104" height="160" fill="#1E232A"/>
+  </g>
+
+  <!-- Gold-foil bands -->
+  <g fill="#C8A45D">
+    <rect x="340" y="44" width="104" height="3"/><rect x="340" y="168" width="104" height="3"/>
+    <rect x="494" y="44" width="104" height="3"/><rect x="494" y="168" width="104" height="3"/>
+    <rect x="648" y="44" width="104" height="3"/><rect x="648" y="168" width="104" height="3"/>
+    <rect x="802" y="44" width="104" height="3"/><rect x="802" y="52" width="104" height="3"/><rect x="802" y="168" width="104" height="3"/>
+  </g>
+
+  <!-- Spine titles -->
+  <g font-size="13" font-weight="700" letter-spacing="2.6" text-anchor="middle">
+    <text x="84"  y="114" fill="#141414">PAPER</text>
+    <text x="238" y="114" fill="#141414">SHEET</text>
+    <text x="392" y="114" fill="#ECE8E0">INK</text>
+    <text x="546" y="114" fill="#ECE8E0">COBALT</text>
+    <text x="700" y="114" fill="#ECE8E0">CRIMSON</text>
+    <text x="854" y="114" fill="#C8A45D">CLOTH</text>
+  </g>
+
+  <!-- Hex labels -->
+  <g font-size="12" font-weight="500" letter-spacing="1.8" fill="#6E6A63" text-anchor="middle">
+    <text x="84"  y="214">#ECE8E0</text>
+    <text x="238" y="214">#F4F1EA</text>
+    <text x="392" y="214">#141414</text>
+    <text x="546" y="214">#1F3FB0</text>
+    <text x="700" y="214">#8C2218</text>
+    <text x="854" y="214">#1E232A · #C8A45D</text>
+  </g>
+</svg>

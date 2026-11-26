@@ -19,6 +19,13 @@ Scroll the spines, pull a volume off the shelf, and acquire it through Stripe.
 
 <br />
 
+<a href="docs/reel/bibliotheca-obscura-reel-web.mp4"><img src="docs/reel/bibliotheca-obscura-reel-thumb.jpg" width="100%" alt="The reel's end card: the curved shelf facing Cartographer of Moths, a play button on its cover, Acquire it. beneath" /></a>
+
+**[▶ Watch the 60-second reel](docs/reel/bibliotheca-obscura-reel-web.mp4)**<br />
+<sub>Also as a <a href="docs/reel/bibliotheca-obscura-reel.mp4">1080p60 master</a> and a <a href="docs/reel/bibliotheca-obscura-reel-vertical.mp4">vertical 9:16 cut</a>, with sound. See <a href="#reel">Reel</a>.</sub>
+
+<br />
+
 <img src="docs/preview/preview.gif" alt="Scrolling the curved shelf, opening a folio and returning it to the shelf" width="100%" />
 
 </div>
@@ -93,6 +100,39 @@ focus, crimson for seals and status, and dark book-cloth with gold-foil bands.
 The tokens live in [`frontend/src/index.css`](frontend/src/index.css), and
 [`FRONTEND_PROMPT.md`](FRONTEND_PROMPT.md) is the full design specification the
 frontend was built from.
+
+## Reel
+
+A 60-second walkthrough in six plates: the shelf, the folio, search and the
+catalogue, signing in and acquiring, the return from checkout, and the same
+shelf on a phone. It lives in [`docs/reel/`](docs/reel/):
+
+| File | Cut |
+| --- | --- |
+| [`bibliotheca-obscura-reel.mp4`](docs/reel/bibliotheca-obscura-reel.mp4) | 16:9 master, 1920×1080, 60 fps |
+| [`bibliotheca-obscura-reel-web.mp4`](docs/reel/bibliotheca-obscura-reel-web.mp4) | 1280×720, 30 fps, under 9.4 MB (linked above) |
+| [`bibliotheca-obscura-reel-vertical.mp4`](docs/reel/bibliotheca-obscura-reel-vertical.mp4) | 9:16, 1080×1920, 30 fps, filmed on the phone layout with touch |
+| `bibliotheca-obscura-reel-thumb.jpg`, `…-vertical-cover.jpg` | the posters |
+
+Filmed from the running app. The shelf shows the app's built-in specimen catalogue: invented titles with covers the app draws itself. The sign-in, the hand-off to Stripe Checkout and the sold state (Plates IV–V) use API responses served from local fixtures shaped like the backend's, and Stripe's own page is never shown. Fonts: Inter Tight and Newsreader (SIL OFL).
+
+[`tools/showreel`](tools/showreel/timeline.mjs) films a production build
+(`vite preview` on :5180, never your dev server on :5173) frame by frame under
+a virtual clock, then a WebGL compositor cuts the shots together with paper and
+book transitions and a score synthesised to the picture. The backend is never
+started. To re-render:
+
+```bash
+cd tools/showreel && npm install
+npm run fixtures                       # once: the folios as backend documents, the demo session, the font cache
+npm run smoke                          # prove the virtual clock on this app
+npm run capture -- --aspect 9x16 M     # the phone shot (both cuts use it)
+npm run capture                        # the 16:9 shots
+npm run render                         # compose, score and encode
+npm run capture -- --aspect 9x16       # the vertical cut's shots, then:
+npm run render -- --aspect 9x16        # (it reuses the 16:9 score)
+npm run verify                         # the acceptance checks (-- --aspect 9x16)
+```
 
 ---
 

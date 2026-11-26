@@ -1,0 +1,1330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Bibliotheca Obscura reel</title>
+<!--
+  The 60-second Bibliotheca Obscura reel. Every frame is a pure function of time: window.renderFrame(k)
+  draws output frame k from footage filmed out of the running app (capture.mjs + shots*.mjs: 180 or
+  90 subframes a second under virtual time) and averages three subframes, each drawn with four camera
+  samples, into motion blur. The edit (timeline.mjs), the cameras, the four transitions (a paper
+  sheet, a row of cloth spines, the folio's ink, a turning page) and the reel's own graphics (title,
+  catalogue slips, cursor or touch disc, phone plate, end card) are drawn here. window.renderAudio()
+  renders the score (lib/score.js). ?aspect=16x9 (1920×1080, 60 fps) or ?aspect=9x16 (1080×1920, 30 fps).
+
+  House rules (brief §8): only the app's colour tokens and their precomputed flat mixes, exactly two
+  type families (the app's own Inter Tight and Newsreader files), square corners (3 px at most), 1 px
+  rules, hard offset shadows in cobalt-soft, circles only for seals, the ruler dot, the touch disc and
+  the play glyph. No gradients (the page turn's fold shade is the one commented exception), no glow,
+  no blur, no bloom, no vignette, no rounded cards, no soft shadows, no fades of type.
+-->
+<link rel="stylesheet" href="fonts/stylesheet.css" />
+<style>
+html, body { margin: 0; overflow: hidden; background: #ECE8E0; }
+canvas#gl { position: absolute; left: 0; top: 0; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<script type="module">
+import * as TL from "./timeline.mjs";
+import { easeInk, easeSpring, easeArrive, spoolRise } from "./lib/ease.js";
+
+// ───────────────────────────── setup ─────────────────────────────
+const params = new URLSearchParams(location.search);
+const ASPECT = params.get("aspect") === "9x16" ? "9x16" : "16x9";
+const V = ASPECT === "9x16";
+const W = V ? 1080 : 1920, H = V ? 1920 : 1080;
+const PAGE = V ? { w: 432, h: 768 } : { w: 1600, h: 900 };
+const PHONE_PAGE = { w: 432, h: 768 };
+/** Output px per page CSS px at zoom 1. */
+const S0 = W / PAGE.w;
+const FPS = TL.FPS[ASPECT], SUB_FPS = TL.SUB_FPS[ASPECT], SUB = 3, CAM_SAMPLES = 4;
+const DURATION = TL.DURATION;
+const MAX_ZOOM = V ? 1.2 : 1.25;
+const SERIF = '"Newsreader"';
+const SANS = '"Inter Tight"';
+/** Which capture each segment's footage comes from: M (the phone) is shared by both cuts. */
+const FOOTAGE = (seg) => (V || seg === "M" ? "9x16" : "16x9");
+/** In 16:9, M is shown as a phone card on the paper plate; in 9:16 it is full-bleed. */
+const PHONE_CARD = !V;
+
+// the app's tokens (frontend/src/index.css) and the flat mixes the reel uses
+const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+const toHex = (rgb) => "#" + rgb.map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("");
+/** a over b at alpha k (the browser's own blend of an rgba token over a surface) */
+const mix = (a, b, k) => toHex(hex(a).map((v, i) => v * k + hex(b)[i] * (1 - k)));
+const C = {
+  paper: "#ECE8E0", sheet: "#F4F1EA", ink: "#141414", muted: "#6E6A63", cobalt: "#1F3FB0", crimson: "#8C2218",
+  clothDark: "#1E232A", gold: "#C8A45D", goldHi: "#F1DFA9",
+};
+C.ruleOnPaper = mix(C.ink, C.paper, 0.85); // --rule rgba(20,20,20,.85) over --paper
+C.ruleOnSheet = mix(C.ink, C.sheet, 0.85);
+C.softOnPaper = mix(C.cobalt, C.paper, 0.12); // --cobalt-soft over --paper ≈ #D3D4DA
+C.softOnSheet = mix(C.cobalt, C.sheet, 0.12); // ≈ #DADCE3
+// lib/procedural.ts: the twelve cloths and four foils (the spine strips only)
+const CLOTHS = ["#5B1F1A", "#1F3A2E", "#1B2A4A", "#4A3423", "#2B3138", "#3B2440", "#6A4B1E", "#1E4347", "#1E232A", "#70291F", "#D8D0BC", "#C9C2B2"];
+const FOILS = { gold: ["#C8A45D", "#F1DFA9"], cobalt: ["#1F3FB0", "#4D6EE6"], blind: ["#141414", "#3A3A3A"], white: ["#E9E4D8", "#FFFFFF"] };
+/** The specimens' own cloth and foil picks (data/fallbackCatalog.ts), in shelf order. */
+const SPECIMEN_SPINES = [
+  [1, "gold", "THE SILENT VALLEY"], [4, "white", "AN ATLAS OF LOST WEATHER"], [2, "gold", "THE BLUE HOUR"], [3, "gold", "CARTOGRAPHER OF MOTHS"],
+  [7, "gold", "RIVER OF SALT"], [10, "cobalt", "THE GLASS ORCHARD"], [11, "blind", "WINTER ARITHMETIC"], [9, "gold", "NOON IN ASHES"],
+  [8, "white", "NIGHT FERRY TO OTARU"], [0, "gold", "THIRTEEN QUIET ROOMS"], [10, "cobalt", "THE PAPER TIDE"], [7, "gold", "A LANTERN FOR THE DROWNED"],
+];
+/** Flat edge tints of a cloth: a lighter left edge and a darker right edge (precomputed, no gradient). */
+const lighter = (c) => mix("#FFFFFF", c, 0.12);
+const darker = (c) => mix("#000000", c, 0.28);
+
+const clamp = (x, a = 0, b = 1) => (x < a ? a : x > b ? b : x);
+const lerp = (a, b, u) => a + (b - a) * u;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const easeInOut = (u) => ((u = clamp(u)) < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2);
+
+/** Monotone cubic (Fritsch–Carlson) through [time, value] keys: never overshoots. */
+function monotone(keys) {
+  const n = keys.length, xs = keys.map((k) => k[0]), ys = keys.map((k) => k[1]);
+  if (n === 1) return () => ys[0];
+  const d = [], m = new Array(n);
+  for (let i = 0; i < n - 1; i++) d.push((ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]));
+  m[0] = d[0];
+  m[n - 1] = d[n - 2];
+  for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    if (d[i] === 0) { m[i] = 0; m[i + 1] = 0; continue; }
+    const a = m[i] / d[i], b = m[i + 1] / d[i], s = a * a + b * b;
+    if (s > 9) { const k = 3 / Math.sqrt(s); m[i] = k * a * d[i]; m[i + 1] = k * b * d[i]; }
+  }
+  return (x) => {
+    if (x <= xs[0]) return ys[0];
+    if (x >= xs[n - 1]) return ys[n - 1];
+    let i = 0;
+    while (x > xs[i + 1]) i++;
+    const h = xs[i + 1] - xs[i], u = (x - xs[i]) / h, u2 = u * u, u3 = u2 * u;
+    return (2 * u3 - 3 * u2 + 1) * ys[i] + (u3 - 2 * u2 + u) * h * m[i] + (-2 * u3 + 3 * u2) * ys[i + 1] + (u3 - u2) * h * m[i + 1];
+  };
+}
+
+// ───────────────────────────── the edit ─────────────────────────────
+const SEGMENTS = TL.SEGMENTS;
+const CUTS = TL.CUTS;
+const T = TL.T;
+
+/**
+ * Camera keys per segment: [reel t, cx, cy, zoom] in the shot's page CSS px, or [reel t, anchor,
+ * zoom, [dx, dy]] to centre on an element recorded during capture. Zoom 1 shows the whole viewport;
+ * the capture density allows up to MAX_ZOOM (1.25 / 1.2) without softening.
+ */
+const CAMERA = V ? {
+  H: [[0, 216, 384, 1.0], [2.54, 216, 384, 1.03], [3.4, 216, 384, 1.03], [8.4, 216, 380, 1.05], [11.3, 216, 400, 1.12], [11.55, 216, 400, 1.12], [12.05, 216, 384, 1.0], [21.6, 216, 384, 1.0]],
+  S: [[21.5556, 216, 384, 1.0], [30.1, 216, 384, 1.0]],
+  A: [[29.9, 216, 384, 1.0], [42.4, 216, 384, 1.0]],
+  P: [[40.5333, 216, 384, 1.0], [51.5, 216, 384, 1.0]],
+  M: [[50.5556, 216, 384, 1.0], [54.7, 216, 384, 1.0]],
+  E: [[53.3667, 216, 384, 1.0], [54.0, 216, 384, 1.0], [60, 216, 384, 1.04]],
+} : {
+  // the title pushes 1.00 → 1.03 over the held curtain, then the shelf keeps pushing to 1.06
+  H: [
+    [0, 800, 450, 1.0], [2.54, 800, 450, 1.03], [3.4, 800, 450, 1.03], [4.4, 800, 446, 1.04], [6.0, 806, 446, 1.05],
+    [7.5, 830, 448, 1.06], [8.4, 822, 450, 1.06], [11.3, 800, 458, 1.15], [11.52, 800, 458, 1.15], [12.05, 800, 450, 1.0],
+    [13.5, 667, 375, 1.2], [19.4, 667, 525, 1.2], [20.45, 800, 450, 1.0], [21.6, 800, 450, 1.0],
+  ],
+  // on the header (the status), down to the shelf for the re-spool, onto the catalogue sheet, back
+  S: [
+    [21.5556, 800, 450, 1.0], [21.8, 800, 450, 1.0], [22.55, 945, 369, 1.22], [24.15, 945, 369, 1.22], [25.0, 800, 450, 1.0],
+    [27.0, 800, 450, 1.0], [27.6, 960, 410, 1.25], [28.42, 960, 410, 1.25], [29.15, 800, 450, 1.0], [30.1, 800, 450, 1.0],
+  ],
+  // onto the sign-in sheet and its form; out; a push onto the folio's text column and the button
+  A: [
+    [29.9, 800, 450, 1.0], [31.15, 800, 450, 1.0], [31.9, 904, 392, 1.15], [34.95, 904, 392, 1.15], [35.7, 800, 450, 1.0],
+    [37.55, 800, 450, 1.0], [39.0, 656, 520, 1.22], [42.4, 656, 520, 1.22],
+  ],
+  // the return slip, down to the SOLD caption, out for the bloom, onto the price and the button
+  P: [
+    [40.5333, 800, 450, 1.0], [41.9, 800, 450, 1.0], [42.8, 800, 409, 1.1], [44.75, 800, 409, 1.1], [45.45, 800, 540, 1.22],
+    [45.85, 800, 540, 1.22], [46.45, 800, 450, 1.0], [47.7, 800, 450, 1.0], [49.2, 656, 520, 1.22], [51.5, 656, 520, 1.22],
+  ],
+  M: [[50.5556, 216, 384, 1.0], [54.7, 216, 384, 1.0]],
+  E: [[53.3667, 800, 450, 1.0], [54.0, 800, 450, 1.0], [60, 800, 450, 1.04]],
+};
+
+// ───────────────────────────── footage ─────────────────────────────
+const META = {};
+const SHOT_IDS = Object.keys(SEGMENTS);
+const pageOf = (seg) => (FOOTAGE(seg) === "9x16" ? PHONE_PAGE : PAGE);
+
+function shotIndex(seg, T) {
+  const meta = META[SEGMENTS[seg].shot];
+  return clamp(Math.round((T - SEGMENTS[seg].from) * meta.fps), 0, meta.frames.length - 1);
+}
+/** An anchor's rect [x, y, w, h] (page px) in a segment's shot at reel time T, from the nearest recorded frame. */
+function anchorAt(seg, name, T) {
+  const frames = META[SEGMENTS[seg].shot]?.frames;
+  if (!frames) return null;
+  let i = shotIndex(seg, T);
+  i -= i % 3;
+  for (let k = i; k >= 0; k -= 3) if (frames[k].a && frames[k].a[name]) return frames[k].a[name];
+  for (let k = i; k < frames.length; k += 3) if (frames[k].a && frames[k].a[name]) return frames[k].a[name];
+  return null;
+}
+/** An anchor's rect at the recorded frame nearest T, or null if the element was not there (no fallback). */
+function anchorNow(seg, name, T) {
+  const frames = META[SEGMENTS[seg].shot]?.frames;
+  if (!frames) return null;
+  let i = shotIndex(seg, T);
+  i -= i % 3;
+  return frames[i]?.a?.[name] ?? null;
+}
+/** The app's measured events (meta.events / meta.starts) in reel seconds. */
+const reelOf = (seg, t) => t + SEGMENTS[seg].from;
+
+const CAM = {};
+function buildCameras() {
+  for (const [seg, keys] of Object.entries(CAMERA)) {
+    const page = pageOf(seg);
+    const pts = keys.map((k) => {
+      if (typeof k[1] === "string") {
+        const r = anchorAt(seg, k[1], k[0]);
+        if (!r) throw new Error(`camera ${seg}: no anchor "${k[1]}" at ${k[0]}`);
+        const [dx, dy] = k[3] ?? [0, 0];
+        return [k[0], r[0] + r[2] / 2 + dx, r[1] + r[3] / 2 + dy, k[2]];
+      }
+      return k;
+    });
+    const fx = monotone(pts.map((p) => [p[0], p[1]]));
+    const fy = monotone(pts.map((p) => [p[0], p[2]]));
+    const fz = monotone(pts.map((p) => [p[0], p[3]]));
+    CAM[seg] = (T) => {
+      const z = clamp(fz(T), 1, MAX_ZOOM);
+      const hw = page.w / 2 / z, hh = page.h / 2 / z;
+      return [clamp(fx(T), hw, page.w - hw), clamp(fy(T), hh, page.h - hh), z];
+    };
+  }
+}
+/** Page px → output px through a camera. */
+const toScreen = (cam, x, y) => [(x - cam[0]) * cam[2] * S0 + W / 2, (y - cam[1]) * cam[2] * S0 + H / 2];
+
+/** The phone card (16:9 plate VI): where the 432 × 768 capture sits on the paper, in output px. */
+const CARD = (() => {
+  const h = 868, w = Math.round((h * 432) / 768);
+  return { x: W - 214 - w, y: Math.round((H - h) / 2), w, h, k: h / 768 };
+})();
+const cardScreen = (x, y) => [CARD.x + x * CARD.k, CARD.y + y * CARD.k];
+
+// ───────────────────────────── overlays (2D) ─────────────────────────────
+const overlay = [0, 1, 2].map(() => {
+  const c = document.createElement("canvas");
+  c.width = W;
+  c.height = H;
+  // software-rasterised from the first stroke, so the same frame comes out the same on every page
+  c.getContext("2d", { willReadFrequently: true });
+  return c;
+});
+
+/** Sets a font with tracking (canvas letterSpacing). */
+function setFont(g, weight, size, family, tracking = 0, style = "normal") {
+  g.font = `${style} ${weight} ${size}px ${family}`;
+  g.letterSpacing = `${tracking * size}px`;
+}
+/** Width of tracked text without the trailing letter-space. */
+const textWidth = (g, s) => g.measureText(s).width - (parseFloat(g.letterSpacing) || 0);
+
+/**
+ * Text that rises from behind its own mask (translateY 105 % → 0, --ease-spring by default): the
+ * app's reveal for every line of type. `out` slides it up out of the same mask. Never a fade.
+ */
+function maskText(g, text, x, y, size, color, t0, T, { dur = 0.82, ease = easeSpring, out = Infinity, outDur = TL.SLIP_MS, align = "left" } = {}) {
+  const u = ease(prog(T, t0, t0 + dur));
+  const v = Number.isFinite(out) ? easeSpring(prog(T, out, out + outDur)) : 0;
+  if (u <= 0 || v >= 1) return 0;
+  const w = textWidth(g, text);
+  const left = align === "center" ? x - w / 2 : align === "right" ? x - w : x;
+  g.save();
+  g.beginPath();
+  g.rect(left - size * 0.3, y - size * 1.02, w + size * 0.6, size * 1.3);
+  g.clip();
+  g.fillStyle = color;
+  g.textAlign = "left";
+  g.textBaseline = "alphabetic";
+  g.fillText(text, left, y + size * 1.3 * (1 - u) - size * 1.3 * v);
+  g.restore();
+  return w;
+}
+
+/** The brand mark (frontend/public/favicon.svg): ink, cobalt and crimson spines, rising one by one. */
+function drawMark(g, x, y, h, starts, T, dur = 0.82) {
+  const k = h / 44;
+  const spines = [[0, 9, C.ink], [12, 9, C.cobalt], [24, 12, C.crimson]];
+  spines.forEach(([dx, w, col], i) => {
+    const u = easeSpring(prog(T, starts[i], starts[i] + dur));
+    if (u <= 0) return;
+    g.save();
+    g.beginPath();
+    g.rect(x + dx * k - 1, y - 1, w * k + 2, h + 2);
+    g.clip();
+    g.fillStyle = col;
+    g.fillRect(x + dx * k, y + h * 1.05 * (1 - u), w * k, h);
+    g.restore();
+  });
+  return 36 * k;
+}
+
+/** [ LABEL ] in the app's .bracket-btn style: muted brackets, tracked caps; `col` for the word. */
+function bracketLabel(g, text, x, y, size, col, t0, T, align = "left") {
+  setFont(g, 600, size, SANS, 0.16);
+  const gap = size * 0.3 + size * 0.16;
+  const wl = textWidth(g, "["), wt = textWidth(g, text), wr = textWidth(g, "]");
+  const total = wl + gap + wt + gap + wr;
+  const left = align === "center" ? x - total / 2 : x;
+  maskText(g, "[", left, y, size, C.muted, t0, T);
+  maskText(g, text, left + wl + gap, y, size, col, t0, T);
+  maskText(g, "]", left + wl + gap + wt + gap, y, size, C.muted, t0, T);
+  return total;
+}
+
+// ── the title (16:9: drawn in page space on H's held curtain, and printed on it: §7.0) ──
+let LIFT_H = null; // reel time H's curtain starts to lift (measured: meta.starts clip-out-up)
+function drawTitle(g, T, cam) {
+  if (T > LIFT_H + TL.D.lift + 0.05) return;
+  const e = T < LIFT_H ? 0 : easeInk(prog(T, LIFT_H, LIFT_H + TL.D.lift));
+  g.save();
+  g.translate(W / 2, H / 2);
+  g.scale(cam[2] * S0, cam[2] * S0);
+  g.translate(-cam[0], -cam[1]);
+  // the curtain's own clip: inset(0 0 X% 0), X = 100·easeInk(u) — the type leaves with the paper
+  g.beginPath();
+  g.rect(0, 0, PAGE.w, PAGE.h * (1 - e));
+  g.clip();
+  // 9:16: the mark and the label in the top third, the headline below (all inside x 64–1016, y 220–1540)
+  const L = V
+    ? { x: 32, markY: 196, markH: 30, word: 11.5, headY: 368, head: 42, lead: 41, kick: 10.5 }
+    : { x: 150, markY: 244, markH: 58, word: 21, headY: 452, head: 128, lead: 123, kick: 19 };
+  // the mark and the wordmark beside it (on the phone, the sub-line goes under the wordmark)
+  const mw = drawMark(g, L.x, L.markY, L.markH, TL.T.spines, T);
+  setFont(g, 600, L.word, SANS, 0.16);
+  const wx = L.x + mw + L.word * 0.9;
+  if (V) {
+    maskText(g, TL.TITLE.mark, wx, L.markY + L.word * 1.05, L.word, C.ink, TL.T.wordmark, T);
+    maskText(g, TL.TITLE.sub, wx, L.markY + L.markH - L.word * 0.05, L.word, C.muted, TL.T.wordmark + 0.07, T);
+  } else {
+    const wy = L.markY + L.markH * 0.5 + L.word * 0.36;
+    maskText(g, TL.TITLE.mark, wx, wy, L.word, C.ink, TL.T.wordmark, T);
+    maskText(g, TL.TITLE.sub, wx + textWidth(g, TL.TITLE.mark) + L.word * 0.8, wy, L.word, C.muted, TL.T.wordmark + 0.07, T);
+  }
+  // the headline: Newsreader 500, two lines, words 70 ms apart
+  setFont(g, 500, L.head, SERIF, -0.028);
+  let maxW = 0;
+  TL.TITLE.lines.forEach((line, li) => {
+    const y = L.headY + li * L.lead;
+    let x = L.x - L.head * 0.03;
+    const words = line.split(" ");
+    words.forEach((word, wi) => {
+      maskText(g, word, x, y, L.head, C.ink, TL.T.headline[li] + wi * 0.07, T);
+      x += textWidth(g, word) + L.head * 0.24;
+    });
+    maxW = Math.max(maxW, x - L.x);
+  });
+  // a 1 px rule draws left to right under it
+  const ry = L.headY + L.lead + L.head * 0.36;
+  const ru = easeInk(prog(T, TL.T.rule, TL.T.rule + 0.62));
+  if (ru > 0) {
+    g.fillStyle = C.ruleOnPaper;
+    g.fillRect(L.x, ry, (maxW - L.head * 0.24) * ru, 1);
+  }
+  // [ A WALKTHROUGH IN SIX PLATES ]
+  bracketLabel(g, TL.TITLE.kicker, L.x, ry + L.kick * 2.7, L.kick, C.ink, TL.T.kicker, T);
+  g.restore();
+}
+
+// ── the cursor (16:9) and the touch disc (9:16, and the 16:9 phone card) ──
+/** A classic arrow: --sheet fill, 1.5 px --ink keyline, no shadow. */
+const ARROW = new Path2D("M1 1 L1 25.5 L7.2 19.6 L11.4 29.2 L15.6 27.4 L11.5 17.9 L19.8 17.9 Z");
+function pressState(meta, t) {
+  let pressed = false, ringAge = Infinity, ringAt = null;
+  for (const p of meta.presses) {
+    if (p.kind === "key" || p.kind === "wheel") continue;
+    if (t >= p.down) {
+      const age = t - p.down;
+      if (age < ringAge) { ringAge = age; ringAt = p; }
+      if (t < p.up) pressed = true;
+    }
+  }
+  for (const d of [...meta.drags, ...(meta.swipes ?? [])]) if (t >= d.at && t < d.at + d.move + d.hold) pressed = true;
+  return { pressed, ringAge, ringAt };
+}
+/** The press acknowledgement: a 1.5 px cobalt ring, 8 → 28 px over 420 ms, constant thickness, then gone. */
+function ring(g, x, y, age, scale) {
+  if (age < 0 || age > 0.42) return;
+  const r = (8 + 20 * easeSpring(age / 0.42)) * scale;
+  g.strokeStyle = C.cobalt;
+  g.lineWidth = 1.5 * scale;
+  g.beginPath();
+  g.arc(x, y, r, 0, Math.PI * 2);
+  g.stroke();
+}
+function drawCursor(g, seg, T, cam) {
+  const meta = META[SEGMENTS[seg].shot];
+  if (!meta || meta.input === "touch") return drawTouch(g, seg, T, cam);
+  const i = shotIndex(seg, T);
+  const f = meta.frames[i];
+  if (!f || !f.m) return;
+  const t = T - SEGMENTS[seg].from;
+  // appears by scaling in (120 ms, --ease-spring); a shot that opens with the cursor already shown does not
+  let shown = 0;
+  for (let k = i; k >= 0 && meta.frames[k].m; k--) shown++;
+  const fromStart = meta.cursorFromStart && shown === i + 1;
+  const appear = fromStart ? 1 : easeSpring(clamp(shown / meta.fps / 0.12));
+  const [x, y] = toScreen(cam, f.m[0], f.m[1]);
+  const { pressed, ringAge, ringAt } = pressState(meta, t);
+  const scale = S0 * (0.9 + 0.1 * cam[2]);
+  if (ringAt) {
+    const [rx, ry] = toScreen(cam, ringAt.x, ringAt.y);
+    ring(g, rx, ry, ringAge, scale);
+  }
+  if (appear <= 0) return;
+  g.save();
+  g.translate(x, y);
+  g.scale(scale * appear, scale * appear);
+  if (pressed) g.translate(1.5, 1.5);
+  g.translate(-1, -1);
+  g.fillStyle = C.sheet;
+  g.fill(ARROW);
+  g.lineWidth = 1.5;
+  g.lineJoin = "miter";
+  g.strokeStyle = C.ink;
+  g.stroke(ARROW);
+  g.restore();
+}
+/** The touch disc: --sheet with a 1.5 px ink keyline, shown around taps, swipes and the folio scroll. */
+function drawTouch(g, seg, T, cam, card = false) {
+  const meta = META[SEGMENTS[seg].shot];
+  const t = T - SEGMENTS[seg].from;
+  const at = (x, y) => (card ? cardScreen(x, y) : toScreen(cam, x, y));
+  const size = card ? 24 : 36 * (W / 1080);
+  let vis = 0, pressed = false, pos = null;
+  const f = meta.frames[shotIndex(seg, T)];
+  for (const p of meta.presses) {
+    if (p.kind !== "tap") continue;
+    const a = prog(t, p.down - 0.2, p.down - 0.05), b = 1 - prog(t, p.up + 0.1, p.up + 0.26);
+    const v = Math.min(a, b);
+    if (v > vis) { vis = v; pos = [p.x, p.y]; }
+    if (t >= p.down && t < p.up) pressed = true;
+  }
+  for (const d of meta.swipes ?? []) {
+    const end = d.at + d.move + d.hold;
+    const a = prog(t, d.at - 0.2, d.at - 0.05), b = 1 - prog(t, end + 0.1, end + 0.26);
+    const v = Math.min(a, b);
+    if (v > vis) {
+      vis = v;
+      const u = easeInOut(prog(t, d.at, d.at + d.move));
+      pos = [lerp(d.from[0], d.to[0], u), lerp(d.from[1], d.to[1], u)];
+    }
+    if (t >= d.at && t < end) pressed = true;
+  }
+  for (const s of meta.scrolls ?? []) {
+    if (!s.finger) continue;
+    const a = prog(t, s.at - 0.2, s.at - 0.05), b = 1 - prog(t, s.at + s.dur + 0.1, s.at + s.dur + 0.26);
+    const v = Math.min(a, b);
+    if (v > vis) {
+      vis = v;
+      // the finger stays inside the phone's safe zone: it travels at most to page y 100, and a longer
+      // scroll carries on under it, as a touch scroll does
+      const y0 = Math.min(s.finger[1], 596), travel = Math.min(s.by, y0 - 100);
+      pos = [s.finger[0], y0 - travel * easeInOut(prog(t, s.at, s.at + s.dur))];
+    }
+    if (t >= s.at && t < s.at + s.dur) pressed = true;
+  }
+  const { ringAge, ringAt } = pressState(meta, t);
+  if (ringAt && ringAt.kind === "tap") {
+    const [rx, ry] = at(ringAt.x, ringAt.y);
+    ring(g, rx, ry, ringAge, size / 22);
+  }
+  if (vis <= 0 || !pos) return;
+  const [x, y] = at(pos[0], pos[1]);
+  const r = (size / 2) * easeSpring(vis) * (pressed ? 0.85 : 1);
+  g.fillStyle = C.sheet;
+  g.beginPath();
+  g.arc(x, y, r, 0, Math.PI * 2);
+  g.fill();
+  g.lineWidth = 1.5 * (size / 24);
+  g.strokeStyle = C.ink;
+  g.stroke();
+  void f;
+}
+
+// ── plate VI (16:9): the phone card's type ──
+function drawPhonePlate(g, T) {
+  const x = 196;
+  setFont(g, 500, 132, SERIF, -0.028);
+  const t0 = TL.CUTS.find((c) => c.id === "T3").at + 0.3;
+  TL.PHONE.lines.forEach((line, li) => {
+    let wx = x;
+    line.split(" ").forEach((word, wi) => {
+      maskText(g, word, wx, 432 + li * 127, 132, C.ink, t0 + li * 0.17 + wi * 0.07, T);
+      wx += textWidth(g, word) + 132 * 0.24;
+    });
+  });
+  // [ SWIPE ] [ TAP ] [ SCROLL ]: each turns cobalt while its gesture happens
+  const meta = META.M;
+  const t = T - SEGMENTS.M.from;
+  const sw = meta.swipes[0], tap = meta.presses.find((p) => p.kind === "tap"), sc = meta.scrolls[0];
+  const live = [t >= sw.at && t < sw.at + sw.move + sw.hold + 0.25, tap && t >= tap.down && t < tap.up + 0.45, sc && t >= sc.at && t < sc.at + sc.dur + 0.2];
+  let lx = x;
+  TL.PHONE.labels.forEach((label, i) => {
+    lx += bracketLabel(g, label, lx, 690, 25, live[i] ? C.cobalt : C.ink, t0 + 0.42 + i * 0.07, T) + 34;
+  });
+}
+
+// ── the end card: drawn in E's page space over the real shelf (UI hidden) ──
+function drawEndCard(g, T, cam) {
+  g.save();
+  g.translate(W / 2, H / 2);
+  g.scale(cam[2] * S0, cam[2] * S0);
+  g.translate(-cam[0], -cam[1]);
+  const L = V
+    ? { cx: 216, lockY: 128, markH: 24, word: 11, lineY: 566, line: 40, urlY: 603, url: 10 }
+    : { cx: 800, lockY: 62, markH: 40, word: 19, lineY: 726, line: 100, urlY: 806, url: 17 };
+  // the lockup: mark + BIBLIOTHECA OBSCURA + — COLLECTOR ARCHIVE —, one line, centred
+  const t0 = TL.T.endLockup;
+  setFont(g, 600, L.word, SANS, 0.16);
+  const markW = (36 / 44) * L.markH;
+  const gap = L.word * 0.9;
+  const w1 = textWidth(g, TL.END_CARD.mark), w2 = textWidth(g, TL.END_CARD.sub);
+  const total = V ? Math.max(markW, w1, w2) : markW + gap + w1 + gap * 0.9 + w2;
+  if (V) {
+    drawMark(g, L.cx - markW / 2, L.lockY - L.markH, L.markH, [t0, t0 + 0.09, t0 + 0.18], T);
+    maskText(g, TL.END_CARD.mark, L.cx, L.lockY + L.word * 2.2, L.word, C.ink, t0 + 0.15, T, { align: "center" });
+    maskText(g, TL.END_CARD.sub, L.cx, L.lockY + L.word * 4.0, L.word, C.muted, t0 + 0.22, T, { align: "center" });
+  } else {
+    const x0 = L.cx - total / 2;
+    drawMark(g, x0, L.lockY - L.markH / 2, L.markH, [t0, t0 + 0.09, t0 + 0.18], T);
+    const by = L.lockY + L.word * 0.36;
+    maskText(g, TL.END_CARD.mark, x0 + markW + gap, by, L.word, C.ink, t0 + 0.15, T);
+    maskText(g, TL.END_CARD.sub, x0 + markW + gap + w1 + gap * 0.9, by, L.word, C.muted, t0 + 0.22, T);
+  }
+  // the three lines, one at a time where the app's caption sits, with the caption's own motion
+  setFont(g, 500, L.line, SERIF, -0.028);
+  const lines = TL.END_CARD.lines, at = TL.T.endLines;
+  lines.forEach((line, i) => {
+    const out = i + 1 < lines.length ? at[i + 1] : Infinity;
+    maskText(g, line, L.cx, L.lineY, L.line, C.ink, at[i], T, { dur: 0.82, out, outDur: 0.6, align: "center" });
+  });
+  // the repository, uppercase and tracked like the app's labels
+  setFont(g, 600, L.url, SANS, 0.16);
+  maskText(g, TL.END_CARD.url.toUpperCase(), L.cx, L.urlY, L.url, C.muted, TL.T.endUrl, T, { align: "center" });
+  g.restore();
+}
+
+// ── catalogue slips (captions): the app's .notice, two cells, the caption's mask slide ──
+const SLIP = V ? { size: 30, padX: 22, padY: 17, gap: 18, sh: 7, line: 2 } : { size: 26, padX: 19, padY: 15, gap: 17, sh: 7, line: 2 };
+function slipBox(g, cap) {
+  setFont(g, 900, SLIP.size, SANS, 0.08);
+  const wn = Math.max(textWidth(g, cap.n), SLIP.size * 0.9);
+  setFont(g, 600, SLIP.size, SANS, 0.16);
+  const wt = textWidth(g, cap.text);
+  const cellN = wn + SLIP.padX * 2, cellT = wt + SLIP.padX * 2;
+  const w = cellN + SLIP.line + cellT, h = SLIP.size * 0.74 + SLIP.padY * 2;
+  return { w, h, wn, wt, cellN, cellT };
+}
+function slipRect(g, cap, pos) {
+  const b = slipBox(g, cap);
+  // 9:16: centred; `v` is the slip's top in output px, chosen inside the safe zone (y 220–1540) by slipPlace()
+  if (V) return { ...b, x: Math.round((W - b.w) / 2), y: typeof pos === "number" ? pos : pos === "low" ? 1380 : 250 };
+  // low: bottom left (clear of the ARCHIVE monolith's halftone column), its shadow 6 px above the ruler dot's cobalt-soft ring (page y 832 − 5.5 − 5 at zoom 1), clear of the caption
+  if (pos === "low") return { ...b, x: Math.round(104 * S0), y: Math.round((832 - 5.5 - 5) * S0 - 6 - SLIP.sh - b.h) };
+  if (pos === "high") return { ...b, x: Math.round((W - b.w) / 2), y: 98 };
+  if (pos === "high-left") return { ...b, x: Math.round(64 * S0), y: 98 };
+  return { ...b, x: Math.round((W - b.w) / 2), y: 28 };
+}
+function drawSlips(g, T) {
+  for (const cap of TL.CAPTIONS) {
+    if (T < cap.from || T > cap.to + TL.SLIP_MS) continue;
+    const r = slipRect(g, cap, V ? cap.v ?? "top" : cap.at ?? "top");
+    const u = easeSpring(prog(T, cap.from, cap.from + TL.SLIP_MS));
+    const v = easeSpring(prog(T, cap.to, cap.to + TL.SLIP_MS));
+    if (u <= 0 || v >= 1) continue;
+    const full = r.h + SLIP.sh + 2;
+    g.save();
+    g.beginPath();
+    g.rect(r.x - 2, r.y - 2, r.w + SLIP.sh + 4, full + 2);
+    g.clip();
+    g.translate(0, full * 1.05 * (1 - u) - full * 1.05 * v);
+    // hard offset shadow in --cobalt-soft (6 px 6 px 0), the sheet, a 1 px --rule outline
+    g.fillStyle = C.softOnPaper;
+    g.fillRect(r.x + SLIP.sh, r.y + SLIP.sh, r.w, r.h);
+    g.fillStyle = C.ruleOnPaper;
+    g.fillRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2);
+    g.fillStyle = C.sheet;
+    g.fillRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
+    // the cell rule
+    g.fillStyle = C.ruleOnSheet;
+    g.fillRect(r.x + r.cellN, r.y + 1, SLIP.line, r.h - 2);
+    const base = r.y + r.h / 2 + SLIP.size * 0.36;
+    setFont(g, 900, SLIP.size, SANS, 0.08);
+    g.fillStyle = C.cobalt;
+    g.textBaseline = "alphabetic";
+    g.fillText(cap.n, r.x + (r.cellN - textWidth(g, cap.n)) / 2, base);
+    setFont(g, 600, SLIP.size, SANS, 0.16);
+    g.fillStyle = C.ink;
+    g.fillText(cap.text, r.x + r.cellN + SLIP.line + SLIP.padX, base);
+    g.restore();
+  }
+}
+/**
+ * 9:16 placement search: for each cue, render its frames without slips and choose the slip's top
+ * (inside the safe zone, y 220 … 1540 − its height) that covers the fewest non-paper pixels over the
+ * cue's whole time on screen; ties go to the band above the shelf (y 250).
+ */
+async function slipPlace(step = 0.25) {
+  const g = overlay[2].getContext("2d");
+  const out = [];
+  for (const cap of TL.CAPTIONS) {
+    const r = slipRect(g, cap, 250);
+    const x0 = Math.max(0, Math.floor(r.x - 4)), w = Math.min(W - x0, Math.ceil(r.w + SLIP.sh + 8));
+    const hh = Math.ceil(r.h + SLIP.sh + 8);
+    const rows = [];
+    const blocked = []; // [y0, y1] output bands an essential UI rect occupies at some sample (never cover it)
+    for (let T = cap.from + TL.SLIP_MS; T <= cap.to; T += step) {
+      const sc = sceneAt(T);
+      for (const seg of sc.b ? [sc.a, sc.b] : [sc.a]) {
+        const cam = CAM[seg](T);
+        for (const name of ["notice", "searchField", "detailTitle", "acquire", "captionTitle", "captionPrice"]) {
+          const a = anchorNow(seg, name, T);
+          if (!a || a[2] < 1 || a[3] < 1) continue;
+          const [ax0, ay0] = toScreen(cam, a[0], a[1]);
+          const [ax1, ay1] = toScreen(cam, a[0] + a[2], a[1] + a[3]);
+          if (ax1 > x0 && ax0 < x0 + w) blocked.push([ay0, ay1]);
+        }
+      }
+      NO_SLIPS = true;
+      await renderFrame(Math.round(T * FPS));
+      NO_SLIPS = false;
+      const buf = new Uint8Array(w * H * 4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.readPixels(x0, 0, w, H, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+      const count = new Uint32Array(H); // per output row (top-down), pixels that are not paper
+      for (let yy = 0; yy < H; yy++) {
+        const base = (H - 1 - yy) * w * 4;
+        let n = 0;
+        for (let i = 0; i < w * 4; i += 4) if (Math.min(buf[base + i], buf[base + i + 1], buf[base + i + 2]) < 170) n++;
+        count[yy] = n;
+      }
+      rows.push(count);
+    }
+    let best = null;
+    for (let y = 220 + 4; y + hh - 4 <= 1540; y += 6) {
+      let worst = 0;
+      for (const count of rows) {
+        let n = 0;
+        for (let yy = y - 4; yy < y - 4 + hh; yy++) n += count[yy];
+        worst = Math.max(worst, n);
+      }
+      if (blocked.some(([b0, b1]) => b0 < y - 4 + hh && b1 > y - 4)) worst += 1e7;
+      if (!best || worst < best.content || (worst === best.content && Math.abs(y - 250) < Math.abs(best.y - 250))) best = { y, content: worst };
+    }
+    out.push({ cue: `${cap.n} · ${cap.text}`, ...best });
+  }
+  return out;
+}
+
+/**
+ * The slips' own check (brief §6.2): render the frame without slips and count the pixels under each
+ * slip (and its shadow) that are not paper or sheet: type, rules, covers. Returns per-cue maxima.
+ */
+let NO_SLIPS = false;
+async function slipCheck(step = 0.25) {
+  const g = overlay[2].getContext("2d");
+  const out = [];
+  const px = new Uint8Array(4);
+  for (const cap of TL.CAPTIONS) {
+    const r = slipRect(g, cap, V ? cap.v ?? "top" : cap.at ?? "top");
+    let worst = { T: null, content: 0 };
+    for (let T = cap.from + TL.SLIP_MS; T <= cap.to; T += step) {
+      NO_SLIPS = true;
+      await renderFrame(Math.round(T * FPS));
+      NO_SLIPS = false;
+      const x0 = Math.max(0, Math.floor(r.x - 4)), y0 = Math.max(0, Math.floor(r.y - 4));
+      const w = Math.min(W - x0, Math.ceil(r.w + SLIP.sh + 8)), h = Math.min(H - y0, Math.ceil(r.h + SLIP.sh + 8));
+      const buf = new Uint8Array(w * h * 4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.readPixels(x0, H - y0 - h, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+      let content = 0;
+      for (let i = 0; i < buf.length; i += 4) {
+        // paper and sheet (with the app's grain) sit above ~190 in every channel; type, rules and covers do not
+        if (Math.min(buf[i], buf[i + 1], buf[i + 2]) < 170) content++;
+      }
+      if (content > worst.content) worst = { T: Math.round(T * 100) / 100, content };
+    }
+    out.push({ cue: `${cap.n} · ${cap.text}`, at: V ? cap.v ?? "top" : cap.at ?? "top", ...worst });
+  }
+  void px;
+  return out;
+}
+
+// ── §7.2 the spine rise: cloth-bound spines drawn flat, rising from the floor centre first ──
+const SPINE = (() => {
+  const Hb = PAGE.w === 1600 ? 432 : Math.min(0.66 * 432, 0.42 * 768);
+  const ws = (Hb * 148) / 840, gap = Hb * 0.038;
+  const n = Math.round(W / ((ws + gap) * S0));
+  return { n, w: W / n };
+})();
+function spineCut() {
+  return CUTS.find((c) => c.kind === "spines");
+}
+/** Spool scalar of the transition: 0 → 1 over the rise, held, 1 → 0 over the sink (§7.2). */
+function spineSpool(T) {
+  const c = spineCut();
+  const t = T - c.at;
+  if (t < 0 || t > c.dur) return 0;
+  if (t <= c.rise) return t / c.rise;
+  if (t <= c.rise + c.hold) return 1;
+  return 1 - (t - c.rise - c.hold) / (c.dur - c.rise - c.hold);
+}
+function drawSpines(g, T) {
+  const c = spineCut();
+  if (T < c.at || T > c.at + c.dur) return;
+  const spool = spineSpool(T);
+  const ic = (SPINE.n - 1) / 2;
+  for (let i = 0; i < SPINE.n; i++) {
+    const e = spoolRise(spool, Math.abs(i - ic));
+    if (e <= 0) continue;
+    const [clothI, foilKind, title] = SPECIMEN_SPINES[i % 12];
+    const cloth = CLOTHS[clothI], [foil] = FOILS[foilKind];
+    const x0 = Math.floor(i * SPINE.w) - 1, x1 = Math.ceil((i + 1) * SPINE.w) + 1;
+    const w = x1 - x0;
+    g.save();
+    // rises out of the floor: translateY + scaleY about the strip's centre, as the engine's spool
+    g.translate(0, H);
+    g.scale(1, e);
+    g.translate(0, -H);
+    g.fillStyle = cloth;
+    g.fillRect(x0, 0, w, H);
+    g.fillStyle = lighter(cloth);
+    g.fillRect(x0, 0, Math.round(w * 0.12), H);
+    g.fillStyle = darker(cloth);
+    g.fillRect(x1 - Math.round(w * 0.12), 0, Math.round(w * 0.12), H);
+    // two foil bands at 7.5 % and 92.5 % of the height
+    g.fillStyle = foil;
+    const bh = Math.max(2, Math.round(H * 0.006));
+    for (const f of [0.075, 0.925]) {
+      g.fillRect(x0 + Math.round(w * 0.12), Math.round(H * f - bh * 1.5), w - 2 * Math.round(w * 0.12), bh);
+      g.fillRect(x0 + Math.round(w * 0.12), Math.round(H * f + bh * 0.5), w - 2 * Math.round(w * 0.12), bh);
+    }
+    // the title lettered down the spine in foil (Inter Tight 700, uppercase)
+    const size = Math.min(w * 0.34, (H * 0.7) / (title.length * 0.72));
+    setFont(g, 700, size, SANS, 0.07);
+    g.fillStyle = foil;
+    g.translate(x0 + w / 2 + size * 0.36, H * 0.15);
+    g.rotate(Math.PI / 2);
+    g.textBaseline = "alphabetic";
+    g.fillText(title, 0, 0);
+    g.restore();
+  }
+}
+/** Uncovered pixels at the swap's three subframes (must be zero: §7.2 "no gaps"). */
+function spineHoles() {
+  const c = spineCut();
+  const cv = document.createElement("canvas");
+  cv.width = W;
+  cv.height = H;
+  const g = cv.getContext("2d", { willReadFrequently: true });
+  return [c.cover - 1 / SUB_FPS, c.cover, c.cover + 1 / SUB_FPS].map((T) => {
+    g.clearRect(0, 0, W, H);
+    drawSpines(g, T);
+    const d = g.getImageData(0, 0, W, H).data;
+    let holes = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] < 255) holes++;
+    return { T: Math.round(T * 1e4) / 1e4, holes };
+  });
+}
+
+/** The thumbnail's play glyph on the end card's active cover: a --sheet disc, a 1.5 px ink ring, a cobalt triangle. */
+let PLAY = false;
+function drawPlay(g, T) {
+  const r = anchorAt("E", "cover", T);
+  if (!r) return;
+  const cam = CAM.E(T);
+  const [x, y] = toScreen(cam, r[0] + r[2] / 2, r[1] + r[3] / 2);
+  const R = V ? 92 : 68;
+  g.fillStyle = C.sheet;
+  g.beginPath();
+  g.arc(x, y, R, 0, Math.PI * 2);
+  g.fill();
+  g.lineWidth = 1.5 * (V ? 2 : 1.4);
+  g.strokeStyle = C.ink;
+  g.stroke();
+  g.fillStyle = C.cobalt;
+  g.beginPath();
+  const a = R * 0.4;
+  g.moveTo(x - a * 0.6, y - a);
+  g.lineTo(x + a * 1.0, y);
+  g.lineTo(x - a * 0.6, y + a);
+  g.closePath();
+  g.fill();
+}
+
+function drawSide(canvas, seg, T, cam) {
+  const g = canvas.getContext("2d");
+  g.clearRect(0, 0, W, H);
+  if (!seg) return;
+  if (seg === "H") drawTitle(g, T, cam);
+  if (seg === "M" && PHONE_CARD) {
+    drawPhonePlate(g, T);
+    drawTouch(g, "M", T, cam, true);
+    return;
+  }
+  if (seg === "E") drawEndCard(g, T, cam);
+  drawCursor(g, seg, T, cam);
+}
+function drawTop(canvas, T) {
+  const g = canvas.getContext("2d");
+  g.clearRect(0, 0, W, H);
+  drawSpines(g, T);
+  if (!NO_SLIPS) drawSlips(g, T);
+  if (PLAY) drawPlay(g, T);
+}
+
+// ───────────────────────────── WebGL ─────────────────────────────
+const canvas = document.getElementById("gl");
+canvas.width = W;
+canvas.height = H;
+canvas.style.width = W + "px";
+canvas.style.height = H + "px";
+const gl = canvas.getContext("webgl2", { antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: true, alpha: false });
+if (!gl.getExtension("EXT_color_buffer_float")) throw new Error("EXT_color_buffer_float is required");
+
+const VERT = `#version 300 es
+in vec2 aPos; out vec2 vUv;
+void main() { vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+const SCENE_FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 outColor;
+uniform vec2 uRes, uPage;
+uniform float uS0, uWeight, uHair;
+uniform sampler2D uA, uB, uOA, uOB, uTop, uPlate;
+uniform vec3 uCamA, uCamB;
+uniform vec4 uCardA, uCardB;
+uniform int uHasA, uHasB, uMode;
+uniform vec4 uP1, uP2, uP3;
+uniform vec3 uBlots[8];
+const vec3 PAPER = vec3(236.0, 232.0, 224.0) / 255.0;
+const vec3 SHEET = vec3(244.0, 241.0, 234.0) / 255.0;
+const vec3 INK = vec3(20.0, 20.0, 20.0) / 255.0;
+const float PI = 3.14159265359;
+
+/** The app's paper grain at px: the held curtain plate divided by --paper (drawn pixels are multiplied by it). */
+vec3 grain(vec2 px) { return clamp(texture(uPlate, px / uRes).rgb / PAPER, 0.6, 1.08); }
+
+vec3 footage(sampler2D tex, vec3 cam, vec2 px, int has, vec4 card) {
+  if (card.z > 0.0) {
+    // the phone card: the 432 × 768 capture in a 3 px-cornered frame, a hairline of ink, on the paper plate
+    vec2 c = card.xy + card.zw * 0.5;
+    float r = 3.0 * uHair / 1.5;
+    vec2 q = abs(px - c) - card.zw * 0.5 + r;
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+    vec3 paper = texture(uPlate, px / uRes).rgb;
+    vec3 inner = texture(tex, clamp((px - card.xy) / card.zw, 0.0, 1.0)).rgb;
+    vec3 col = mix(inner, INK, clamp(d + 0.5, 0.0, 1.0));
+    return mix(col, paper, clamp(d - uHair + 0.5, 0.0, 1.0));
+  }
+  if (has == 0) return PAPER;
+  vec2 css = (px - uRes * 0.5) / (cam.z * uS0) + cam.xy;
+  vec2 uv = css / uPage;
+  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return PAPER;
+  return texture(tex, uv).rgb;
+}
+vec3 over(vec3 c, sampler2D ov, vec2 px) {
+  vec2 uv = px / uRes;
+  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return c;
+  vec4 o = texture(ov, uv);
+  return c * (1.0 - o.a) + o.rgb * grain(px);
+}
+vec3 sideA(vec2 px) { return over(footage(uA, uCamA, px, uHasA, uCardA), uOA, px); }
+vec3 sideB(vec2 px) { return over(footage(uB, uCamB, px, uHasB, uCardB), uOB, px); }
+bool inFrame(vec2 p) { return p.x >= 0.0 && p.y >= 0.0 && p.x < uRes.x && p.y < uRes.y; }
+
+// seeded, hash-based value noise (3 octaves): deterministic
+float hash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+float fbm(vec2 p) {
+  float s = 0.0, a = 0.5, n = 0.0;
+  for (int k = 0; k < 3; k++) { s += a * vnoise(p); n += a; p = p * 2.03 + vec2(7.1, 3.7); a *= 0.5; }
+  return s / n;
+}
+
+void main() {
+  vec2 px = vec2(vUv.x, 1.0 - vUv.y) * uRes;
+  vec3 col;
+  if (uMode == 0) {
+    col = sideA(px);
+  } else if (uMode == 1) {
+    // §7.1 the sheet wipe (the app's clip-in-right): uP1 = (c, k, rule, drift)
+    float c = uP1.x, k = uP1.y, rule = uP1.z;
+    float xb = uRes.x * (1.0 - c);
+    if (px.x < xb) {
+      vec2 q = px - vec2(uP1.w * uRes.x * c, 0.0);
+      // where the drifting sample leaves the frame: the paper (the grained plate), never a clamped edge
+      col = q.x < 0.0 ? texture(uPlate, px / uRes).rgb : sideA(q);
+    } else if (px.x < xb + rule) {
+      col = INK;
+    } else {
+      vec2 q = px - vec2(0.15 * uRes.x * (1.0 - k), 0.0);
+      col = q.x < 0.0 ? texture(uPlate, px / uRes).rgb : sideB(q);
+    }
+  } else if (uMode == 2) {
+    // §7.2 the spine rise: the strips (top layer) cover the frame; the scene swaps under them
+    col = uP1.x < 0.5 ? sideA(px) : sideB(px);
+  } else if (uMode == 3) {
+    // §7.3 the ink bleed: the folio's blots at frame scale, their edge displaced by 3-octave noise at the
+    // app's scale (feTurbulence 0.012 / feDisplacementMap 120 on its 474 px poster): uP1 = (freq, amp)
+    vec2 disp = uP1.y * (vec2(fbm(px * uP1.x), fbm(px * uP1.x + vec2(31.7, 17.3))) - 0.5);
+    vec2 q = px + disp;
+    bool ink = false;
+    for (int k = 0; k < 8; k++) if (uBlots[k].z > 0.0 && length(q - uBlots[k].xy) < uBlots[k].z) ink = true;
+    col = ink ? sideB(px) : sideA(px);
+  } else {
+    // §7.4 the page turn: A curls round a cylinder (radius R) whose axis runs 12° off vertical through F,
+    // travelling right to left; its back shows A mirrored under --sheet; B lies beneath.
+    // uP1 = (F.x, F.y, R, 0), uP2 = (n.x, n.y, 0, 0): n points to the lifted side
+    vec2 F = uP1.xy; float R = uP1.z; vec2 n = uP2.xy;
+    float s = dot(px - F, n);
+    vec2 src;
+    bool done = false;
+    // the turned page lying flat over the front, back side up
+    if (s <= 0.0) {
+      src = px + n * (PI * R - 2.0 * s);
+      if (inFrame(src)) { col = mix(sideA(src), SHEET, 0.86); done = true; }
+    }
+    if (!done && s >= 0.0 && s <= R) {
+      float a = asin(clamp(s / R, 0.0, 1.0));
+      // the top of the cylinder: the back of the page
+      src = px + n * (PI * R - R * a - s);
+      if (inFrame(src)) {
+        // the fold's shade: the one soft gradient permitted in the reel (a derived shade of --ink, ≤ 18 %)
+        col = mix(mix(sideA(src), SHEET, 0.86), INK, 0.10 * (1.0 - s / R));
+        done = true;
+      }
+      if (!done) {
+        // the bottom of the cylinder: the front of the page, curling away from the light
+        src = px + n * (R * a - s);
+        if (inFrame(src)) { col = mix(sideA(src), INK, 0.18 * pow(s / R, 1.5)); done = true; }
+      }
+    }
+    if (!done && s < 0.0) { col = sideA(px); done = true; }
+    if (!done) {
+      // the page beneath, with the curl's contact shade just beyond it (same exception, ≤ 18 %)
+      float sh = s > R ? clamp(1.0 - (s - R) / (0.55 * R), 0.0, 1.0) : 1.0;
+      col = mix(sideB(px), INK, 0.18 * sh * sh);
+    }
+  }
+  col = over(col, uTop, px);
+  outColor = vec4(col * uWeight, 1.0);
+}`;
+
+const FINAL_FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv; out vec4 outColor;
+uniform sampler2D uAcc;
+void main() { outColor = vec4(texture(uAcc, vUv).rgb, 1.0); }`;
+
+function compile(src, type) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(frag) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(VERT, gl.VERTEX_SHADER));
+  gl.attachShader(p, compile(frag, gl.FRAGMENT_SHADER));
+  gl.bindAttribLocation(p, 0, "aPos");
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) {
+    const name = gl.getActiveUniform(p, i).name.replace(/\[0\]$/, "");
+    u[name] = gl.getUniformLocation(p, name);
+  }
+  return { p, u };
+}
+const progScene = program(SCENE_FRAG), progFinal = program(FINAL_FRAG);
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+function texture({ mip = false } = {}) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mip ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+const accTex = texture();
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, W, H, 0, gl.RGBA, gl.HALF_FLOAT, null);
+const accFb = gl.createFramebuffer();
+gl.bindFramebuffer(gl.FRAMEBUFFER, accFb);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, accTex, 0);
+const shotTex = [texture({ mip: true }), texture({ mip: true })];
+const ovTex = [texture(), texture(), texture()];
+const plateTex = texture({ mip: true });
+function upload(tex, source, mip) {
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, !mip);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);
+  if (mip) gl.generateMipmap(gl.TEXTURE_2D);
+}
+function bindTex(unit, tex) {
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+}
+
+// ───────────────────────────── frame assembly ─────────────────────────────
+
+/** What is on screen at reel time T: one segment, or two with a transition between them. */
+function sceneAt(T) {
+  let current = "H";
+  for (const c of CUTS) {
+    if (c.kind === "cut") {
+      if (T < c.at) break;
+      current = c.b;
+      continue;
+    }
+    if (T < c.at) break;
+    if (T < c.at + c.dur) return { a: c.a, b: c.b, cut: c, u: (T - c.at) / c.dur };
+    current = c.b;
+  }
+  return { a: current, b: null, cut: null, u: 0 };
+}
+
+const bitmapCache = new Map();
+async function loadBitmap(seg, T) {
+  const s = SEGMENTS[seg];
+  if (!s || !s.shot) return null;
+  const i = shotIndex(seg, T);
+  const key = `${FOOTAGE(seg)}/${s.shot}/${i}`;
+  if (bitmapCache.has(key)) return bitmapCache.get(key);
+  const res = await fetch(`out/shots/${FOOTAGE(seg)}/${s.shot}/${String(i).padStart(5, "0")}.jpg`);
+  if (!res.ok) throw new Error(`missing frame ${key}`);
+  const bmp = await createImageBitmap(await res.blob(), { colorSpaceConversion: "none", premultiplyAlpha: "none" });
+  bitmapCache.set(key, bmp);
+  if (bitmapCache.size > 10) {
+    const [old] = bitmapCache.keys();
+    bitmapCache.get(old).close();
+    bitmapCache.delete(old);
+  }
+  return bmp;
+}
+
+/** The ink bleed's blots (output px) at camera-sample time Tc: the app's seven, plus one on the Acquire button. */
+const BLOTS = [[150, 330], [340, 600], [250, 120], [90, 760], [400, 250], [260, 860], [230, 470]];
+const BLOT_DELAYS = [0, 120, 220, 300, 380, 460, 540];
+let BLOT_ORIGIN = null;
+function blots(cut, Tc) {
+  const out = new Float32Array(24);
+  const reach = (x, y) => Math.max(Math.hypot(x, y), Math.hypot(W - x, y), Math.hypot(x, H - y), Math.hypot(W - x, H - y)) + 0.14 * W;
+  const list = [[BLOT_ORIGIN[0], BLOT_ORIGIN[1], 0], ...BLOTS.map(([x, y], k) => [(x / 474) * W, (y / 900) * H, BLOT_DELAYS[k]])];
+  list.forEach(([x, y, delay], k) => {
+    const u = prog(Tc, cut.at + delay / 1000, cut.at + delay / 1000 + TL.D.blot);
+    out[k * 3] = x;
+    out[k * 3 + 1] = y;
+    out[k * 3 + 2] = reach(x, y) * easeInk(u);
+  });
+  return out;
+}
+
+/** The transition's shader parameters at camera-sample time Tc. */
+function transition(scene, Tc) {
+  const c = scene.cut;
+  const none = { mode: 0, p1: [0, 0, 0, 0], p2: [0, 0, 0, 0], p3: [0, 0, 0, 0] };
+  if (!c) return none;
+  const u = clamp((Tc - c.at) / c.dur);
+  if (c.kind === "sheet") {
+    const k = easeArrive(prog(u, 0.5, 0.92));
+    return { ...none, mode: 1, p1: [easeInk(u), k, Math.max(2, Math.round(1 * S0)), 0.12] };
+  }
+  if (c.kind === "spines") return { ...none, mode: 2, p1: [Tc >= c.cover ? 1 : 0, 0, 0, 0] };
+  if (c.kind === "ink") {
+    const freq = (0.012 * 474) / W;
+    const amp = (120 * W) / 474;
+    return { ...none, mode: 3, p1: [freq, amp, 0, 0], blots: blots(c, Tc) };
+  }
+  // page: the fold line travels from beyond the right edge to beyond the left, on --ease-ink
+  const th = (12 * Math.PI) / 180;
+  const R = 0.09 * W;
+  const n = [Math.cos(th), Math.sin(th)];
+  const start = W + (H / 2) * Math.tan(th) + 2, end = -(R + (H / 2) * Math.sin(th)) / Math.cos(th) - (Math.PI * R) - 4;
+  const fx = lerp(start, end, easeInk(u));
+  return { ...none, mode: 4, p1: [fx, H / 2, R, 0], p2: [n[0], n[1], 0, 0] };
+}
+
+/** Drawn transitions and the in-app motions whose edges should stay hard use one sharp subframe. */
+function narrowShutter(T) {
+  for (const c of CUTS) if (c.kind !== "cut" && T >= c.at - 0.02 && T <= c.at + c.dur + 0.02) return true;
+  return false;
+}
+
+async function renderSubframe(T, weight, camSpread) {
+  const scene = sceneAt(T);
+  const [ba, bb] = await Promise.all([loadBitmap(scene.a, T), scene.b ? loadBitmap(scene.b, T) : null]);
+  if (ba) upload(shotTex[0], ba, true);
+  if (bb) upload(shotTex[1], bb, true);
+  const camA = CAM[scene.a](T), camB = scene.b ? CAM[scene.b](T) : [PAGE.w / 2, PAGE.h / 2, 1];
+  drawSide(overlay[0], scene.a, T, camA);
+  drawSide(overlay[1], scene.b, T, camB);
+  drawTop(overlay[2], T);
+  for (let k = 0; k < 3; k++) upload(ovTex[k], overlay[k], false);
+
+  const u = progScene.u;
+  gl.useProgram(progScene.p);
+  [shotTex[0], shotTex[1], ovTex[0], ovTex[1], ovTex[2], plateTex].forEach((t, i) => bindTex(i, t));
+  gl.uniform1i(u.uA, 0);
+  gl.uniform1i(u.uB, 1);
+  gl.uniform1i(u.uOA, 2);
+  gl.uniform1i(u.uOB, 3);
+  gl.uniform1i(u.uTop, 4);
+  gl.uniform1i(u.uPlate, 5);
+  gl.uniform2f(u.uRes, W, H);
+  gl.uniform2f(u.uPage, PAGE.w, PAGE.h);
+  gl.uniform1f(u.uS0, S0);
+  gl.uniform1f(u.uHair, 1.5);
+  gl.uniform1i(u.uHasA, ba ? 1 : 0);
+  gl.uniform1i(u.uHasB, bb ? 1 : 0);
+  const card = (seg) => (PHONE_CARD && seg === "M" ? [CARD.x, CARD.y, CARD.w, CARD.h] : [0, 0, 0, 0]);
+  gl.uniform4f(u.uCardA, ...card(scene.a));
+  gl.uniform4f(u.uCardB, ...card(scene.b));
+  gl.uniform1f(u.uWeight, weight / (camSpread > 0 ? CAM_SAMPLES : 1));
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  const samples = camSpread > 0 ? CAM_SAMPLES : 1;
+  for (let k = 0; k < samples; k++) {
+    const Tc = samples > 1 ? T + ((k + 0.5) / samples - 0.5) * camSpread : T;
+    gl.uniform3f(u.uCamA, ...CAM[scene.a](Tc));
+    gl.uniform3f(u.uCamB, ...(scene.b ? CAM[scene.b](Tc) : [PAGE.w / 2, PAGE.h / 2, 1]));
+    const tr = transition(scene, Tc);
+    gl.uniform1i(u.uMode, tr.mode);
+    gl.uniform4f(u.uP1, ...tr.p1);
+    gl.uniform4f(u.uP2, ...tr.p2);
+    gl.uniform4f(u.uP3, ...tr.p3);
+    gl.uniform3fv(u.uBlots, tr.blots ?? new Float32Array(24));
+    gl.bindFramebuffer(gl.FRAMEBUFFER, accFb);
+    gl.viewport(0, 0, W, H);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  gl.disable(gl.BLEND);
+  return scene;
+}
+
+/** Draws output frame k (motion blur: three subframes, four camera samples each; one sharp subframe in transitions). */
+async function renderFrame(k, opts) {
+  PLAY = !!opts?.play;
+  const t = k / FPS;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, accFb);
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  if (narrowShutter(t)) {
+    await renderSubframe(t, 1, 0);
+  } else {
+    for (let s = 0; s < SUB; s++) await renderSubframe(Math.max(0, t + (s - (SUB - 1) / 2) / SUB_FPS), 1 / SUB, 1 / SUB_FPS);
+  }
+  gl.useProgram(progFinal.p);
+  bindTex(0, accTex);
+  gl.uniform1i(progFinal.u.uAcc, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.finish();
+  return k;
+}
+
+/**
+ * House-rules audit of the drawn layers at reel time T (brief §11.7): every pixel the overlays paint
+ * must be a token colour, or an exact blend of two or three of them (anti-aliasing, a translucent edge).
+ */
+function overlayAudit(T) {
+  const scene = sceneAt(T);
+  drawSide(overlay[0], scene.a, T, CAM[scene.a](T));
+  drawSide(overlay[1], scene.b, T, scene.b ? CAM[scene.b](T) : [PAGE.w / 2, PAGE.h / 2, 1]);
+  drawTop(overlay[2], T);
+  const palette = new Set([...Object.values(C), ...CLOTHS, ...CLOTHS.map(lighter), ...CLOTHS.map(darker), ...Object.values(FOILS).flat()]);
+  const tokens = [...palette].map((h) => hex(h).map((v) => v * 255));
+  const near = (p, q) => Math.max(Math.abs(p[0] - q[0]), Math.abs(p[1] - q[1]), Math.abs(p[2] - q[2]));
+  const onSegment = (p, a, b) => {
+    const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    const len = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    const t = len ? Math.max(0, Math.min(1, ((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1] + (p[2] - a[2]) * d[2]) / len)) : 0;
+    return near(p, [a[0] + d[0] * t, a[1] + d[1] * t, a[2] + d[2] * t]);
+  };
+  const out = { T, token: 0, blend: 0, fringe: 0, other: 0, samples: [] };
+  const cache = new Map();
+  for (const cv of overlay) {
+    const d = cv.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i + 3];
+      if (!a) continue;
+      if (a < 40) { out.fringe++; continue; }
+      const key = ((d[i] << 16) | (d[i + 1] << 8) | d[i + 2]) * 4 + Math.floor(a / 64);
+      let verdict = cache.get(key);
+      if (verdict === undefined) {
+        const p = [d[i], d[i + 1], d[i + 2]];
+        // 8-bit premultiplied storage quantises faint edges: the tolerance grows as alpha falls (the sibling's audit)
+        const tol = 3 + (255 - a) / 24;
+        if (tokens.some((q) => near(p, q) <= tol)) verdict = 1;
+        else {
+          verdict = 0;
+          for (let x = 0; x < tokens.length && !verdict; x++) for (let y = x + 1; y < tokens.length && !verdict; y++) if (onSegment(p, tokens[x], tokens[y]) <= tol) verdict = 2;
+        }
+        cache.set(key, verdict);
+      }
+      if (verdict === 1) out.token++;
+      else if (verdict === 2) out.blend++;
+      else {
+        out.other++;
+        if (out.samples.length < 5) out.samples.push([(i / 4) % W, Math.floor(i / 4 / W), d[i], d[i + 1], d[i + 2], a]);
+      }
+    }
+  }
+  return out;
+}
+
+/** 9:16 safe zone (brief §6.3): drawn pixels (type, slips) outside x 64–1016, y 220–1540 at reel time T. */
+function safeAudit(T) {
+  const scene = sceneAt(T);
+  drawSide(overlay[0], scene.a, T, CAM[scene.a](T));
+  drawSide(overlay[1], scene.b, T, scene.b ? CAM[scene.b](T) : [PAGE.w / 2, PAGE.h / 2, 1]);
+  drawTop(overlay[2], T);
+  let inside = 0, outside = 0;
+  const where = [];
+  for (const [k, cv] of overlay.entries()) {
+    const d = cv.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+    for (let i = 3; i < d.length; i += 4) {
+      if (d[i] < 40) continue;
+      const x = ((i - 3) / 4) % W, y = Math.floor((i - 3) / 4 / W);
+      if (x >= 64 && x <= 1016 && y >= 220 && y <= 1540) inside++;
+      else {
+        outside++;
+        if (where.length < 3) where.push([k, x, y]);
+      }
+    }
+  }
+  return { T, inside, outside, where };
+}
+
+/** The cue sheet the score plays: the app's own measured events, in reel seconds (brief §9). */
+function cueSheet() {
+  // the window in which each segment is the one heard (the cuts' swaps: hard cut, full cover, rushes)
+  const swap = { C1: TL.T.matchCut, T1: spineCut().cover, T2: 41.45, T3: 51.0, T4: 54.0 };
+  const win = { H: [0, swap.C1], S: [swap.C1, swap.T1], A: [swap.T1, swap.T2], P: [swap.T2, swap.T3], M: [swap.T3, swap.T4], E: [swap.T4, DURATION] };
+  const cues = { presses: [], keys: [], wheels: [], knocks: [], respools: [], sheets: [], folios: [], folds: [], floods: [], lifts: [], notices: [], fields: [], swipes: [], scrolls: [] };
+  for (const [seg, [w0, w1]] of Object.entries(win)) {
+    const m = META[SEGMENTS[seg].shot];
+    if (!m) continue;
+    const r = (t) => reelOf(seg, t);
+    const inWin = (t) => t >= w0 - 1e-6 && t < w1;
+    for (const p of m.presses) {
+      const t = r(p.down);
+      if (!inWin(t)) continue;
+      if (p.kind === "key") cues.keys.push({ t, key: p.key, seg });
+      else if (p.kind === "wheel") cues.wheels.push({ t, seg });
+      else cues.presses.push({ t, up: r(p.up), seg, kind: p.kind });
+    }
+    for (const d of m.drags) if (inWin(r(d.at))) cues.presses.push({ t: r(d.at), up: r(d.at + d.move + d.hold), seg, kind: "drag", move: d.move, dx: d.to[0] - d.from[0] });
+    for (const d of m.swipes ?? []) if (inWin(r(d.at))) cues.swipes.push({ t: r(d.at), move: d.move, hold: d.hold, seg });
+    for (const s of m.scrolls ?? []) if (inWin(r(s.at))) cues.scrolls.push({ t: r(s.at), dur: s.dur, seg });
+    // knocks: active-volume changes made by the engine (not a re-spool's fresh mount, not the first caption)
+    const books = [];
+    for (const e of m.events) if (e.k === "books") books.push(e);
+    for (const e of m.events) {
+      const t = r(e.t);
+      if (!inWin(t)) continue;
+      if (e.k === "active" && e.was && e.v && !books.some((b) => Math.abs(b.t - e.t) < 0.012)) cues.knocks.push({ t, title: e.v, seg });
+      if (e.k === "books" && e.was > 0 && e.v > 0) cues.respools.push({ t, from: e.was, to: e.v, seg });
+    }
+    for (const s of m.starts) {
+      const t = r(s.t);
+      if (!inWin(t) && !(s.name === "clip-out-up" && t < w1 + 0.6)) continue;
+      if (s.name === "clip-in-right") cues.sheets.push({ t, dur: s.dur / 1000, dir: 1, seg });
+      else if (s.name === "clip-out-right") cues.sheets.push({ t, dur: s.dur / 1000, dir: -1, seg });
+      else if (s.name === "clip-out-up") cues.lifts.push({ t, dur: s.dur / 1000, seg });
+      else if (s.name === "clip-in-down") cues.notices.push({ t, seg });
+      else if (s.kind === "waapi" && s.dur === 1050) cues.folios.push({ t, seg });
+      else if (s.kind === "waapi" && s.dur === 780) cues.folds.push({ t, seg });
+      else if (s.kind === "transition" && s.name === "max-width") cues.fields.push({ t, seg });
+      else if (s.kind === "transition" && s.pseudo === "::before" && /btn-acquire/.test(s.cls)) {
+        // a flood in (the pointer is over the button) or a drain (it left, or the button went busy)
+        const overAt = (st) => {
+          const f = m.frames[clamp(Math.round(st * m.fps), 0, m.frames.length - 1)];
+          return ["acquire", "submit"].some((name) => {
+            const a = anchorAt(seg, name, reelOf(seg, st));
+            return a && f.m && f.m[0] >= a[0] && f.m[0] <= a[0] + a[2] && f.m[1] >= a[1] && f.m[1] <= a[1] + a[3];
+          });
+        };
+        // the pointer has just entered the button (it was outside 50 ms before): the ink floods up
+        cues.floods.push({ t, dur: s.dur / 1000, seg, in: overAt(s.t) && !overAt(s.t - 0.05) });
+      }
+    }
+  }
+  for (const list of Object.values(cues)) list.sort((a, b) => a.t - b.t);
+  // the end card's shelf: knocks on the three lines, measured
+  cues.windows = win;
+  cues.spines = { n: SPINE.n, cut: spineCut() };
+  return cues;
+}
+
+// ───────────────────────────── boot ─────────────────────────────
+async function boot() {
+  const problems = TL.validateTimeline();
+  if (problems.length) throw new Error(problems.join("; "));
+  for (const seg of SHOT_IDS) {
+    const id = SEGMENTS[seg].shot;
+    const res = await fetch(`out/shots/${FOOTAGE(seg)}/${id}/meta.json`);
+    if (!res.ok) throw new Error(`no footage for shot ${id} (${FOOTAGE(seg)}): run capture.mjs`);
+    META[id] = await res.json();
+  }
+  buildCameras();
+  // the measured curtain lift (H): the title is printed on it
+  const lift = META.H.starts.find((s) => s.name === "clip-out-up");
+  if (!lift) throw new Error("H: no curtain lift recorded");
+  LIFT_H = reelOf("H", lift.t);
+  // the ink bleed's eighth blot sits on the Acquire button as it was clicked
+  const cutInk = CUTS.find((c) => c.kind === "ink");
+  const acq = anchorAt("A", "acquire", cutInk.at);
+  BLOT_ORIGIN = acq ? toScreen(CAM.A(cutInk.at), acq[0] + acq[2] / 2, acq[1] + acq[3] / 2) : [W / 2, H / 2];
+  // the paper plate: H's first frame (the held curtain, type hidden) — the app's own grain
+  const plate = await fetch(`out/shots/${FOOTAGE("H")}/${SEGMENTS.H.shot}/00000.jpg`);
+  if (!plate.ok) throw new Error("no paper plate (H frame 0)");
+  upload(plateTex, await createImageBitmap(await plate.blob(), { colorSpaceConversion: "none", premultiplyAlpha: "none" }), true);
+  const faces = [`500 100px ${SERIF}`, `italic 400 40px ${SERIF}`, `600 26px ${SANS}`, `700 26px ${SANS}`, `900 26px ${SANS}`];
+  await Promise.all(faces.map((f) => document.fonts.load(f, "The shelf turns BIBLIOTHECA OBSCURA — [ ] ·")));
+  const fonts = Object.fromEntries(faces.map((f) => [f, document.fonts.check(f, "The shelf BIBLIOTHECA")]));
+  if (Object.values(fonts).some((ok) => !ok)) throw new Error(`the app's fonts did not load: refusing to render with a fallback face ${JSON.stringify(fonts)}`);
+  window.renderFrame = renderFrame;
+  window.renderAudio = () => import("./lib/score.js").then((m) => m.renderScore(cueSheet()));
+  window.cueSheet = cueSheet;
+  window.spineHoles = spineHoles;
+  window.slipCheck = slipCheck;
+  window.slipPlace = slipPlace;
+  window.safeAudit = safeAudit;
+  window.overlayAudit = overlayAudit;
+  window.FRAMES = Math.round(DURATION * FPS);
+  window.REEL = { W, H, FPS, ASPECT, fonts, liftH: LIFT_H, spines: SPINE, card: CARD, blotOrigin: BLOT_ORIGIN };
+  window.__ready = true;
+}
+boot().catch((e) => {
+  window.__error = String(e.stack || e);
+  console.error(e);
+});
+</script>
+</body>
+</html>

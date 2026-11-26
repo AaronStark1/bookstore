@@ -1,0 +1,37 @@
+{
+  "note": "The reel's demo collector. Served by mocks in capture.mjs; never sent to a real backend.",
+  "session": {
+    "token": "reel-demo-token",
+    "user": {
+      "username": "Demo Collector",
+      "email": "collector@example.com",
+      "role": "User"
+    }
+  },
+  "password": "folio1955",
+  "login": {
+    "message": "Login Success",
+    "existingUser": {
+      "username": "Demo Collector",
+      "email": "collector@example.com",
+      "role": "User"
+    },
+    "token": "reel-demo-token"
+  },
+  "makePayment": {
+    "message": "Success",
+    "session": {
+      "id": "cs_test_reel",
+      "url": "http://localhost:5180/#stripe-checkout"
+    },
+    "sessionID": "cs_test_reel"
+  },
+  "unauthorised": {
+    "status": 401,
+    "body": "Authorization Error: No token provided"
+  },
+  "missingBook": {
+    "status": 400,
+    "body": "Book details are required"
+  }
+}

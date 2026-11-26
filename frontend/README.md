@@ -24,6 +24,11 @@ The dev server proxies `/api` and `/uploads` to `http://localhost:3000`
 (override with `VITE_BACKEND_URL`, see `.env.example`). The backend's
 `CLIENT_URL` must stay `http://localhost:5173` so Stripe returns to this app.
 
+On Vercel, `vercel.json` does the same job: it forwards `/api` and `/uploads`
+to the backend deployment (`backend-6jdj.vercel.app`) and serves `index.html`
+for every other path, so Stripe's `/payment-success` and `/payment-error`
+returns load the app. Change the backend address there if it moves.
+
 `npm run build` type-checks and bundles; `npm run lint` runs oxlint.
 
 If the backend is unreachable or has no books, the shelf shows twelve built-in
